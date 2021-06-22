@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+
+# -----------------------------------------------------------------
+# This program shows the current capability sets of all threads or
+# the threads of a specific process.
+#
+# Author: Gerlof Langeveld
+#         gerlof@atcomputing.nl
+#         AT Computing - Velp, The Netherlands
+#
+# Date:   April 2019
+# -----------------------------------------------------------------
+# This file is free software.  You can redistribute it and/or modify
+# it under the terms of the GNU General Public License (GPL); either
+# version 3, or (at your option) any later version.
+#
+
+import sys
+import glob
+import argparse
+
+ALLCAPS = 0
+AMBIENT = False
+
+# Function with main code
+#
+def main():
+    global ALLCAPS, AMBIENT
+
+    # verify command line arguments
+    myparser = argparse.ArgumentParser()
+
+    myparser.add_argument('-H', '--human', action='store_true')
+    myparser.add_argument('-l', '--long',  action='store_true')
+    myparser.add_argument('-p', '--pid',   action='store', type=int)
+
+    args = myparser.parse_args()
+
+    # print header, depending on human readable output
+    if args.human:
+        pass
+    elif args.long:
+        print('%7s %7s %-12.12s  %-10s  %-10s  %-10s  %-10s  %-10s' % (
+                   'PID', 'TID', 'COMMAND',
+                   'EFFECTIVE', 'PERMITTED', 'INHERITABL', 'AMBIENT', 'BOUND')) 
+    else:
+        print('%7s %7s %-12.12s  %-10s  %-10s  %-10s  %-10s' %
+                        ('PID', 'TID', 'COMMAND',
+                        'EFFECTIVE', 'PERMITTED', 'INHERITABL', 'AMBIENT')) 
+
+    # take systemd as reference for a bitlist in which all caps are set
+    # and to see if this kernel supports ambient caps
+    try:
+        ref = open(glob.glob('/proc/1/task/1/status')[0])
+
+        for line in ref:
+            label, *cols = line.split()
+
+            if label == 'CapEff:':
+                ALLCAPS = int(cols[0], 16)
+
+            if label == 'CapAmb:':
+                AMBIENT = True
+
+        ref.close()
+    except Exception:
+        pass
+
+    # specific PID wanted or all PIDs?
+    if args.pid:
+        taskstatus = glob.glob('/proc/%d/task/[0-9]*/status' % args.pid)
+    else:
+        taskstatus = glob.glob('/proc/[0-9]*/task/[0-9]*/status')
+
+    # get status file of every thread
+    for status in taskstatus:
+        try:
+            t = open(status)
+        except Exception:
+            continue
+
+        capinh = capprm = capeff = capbnd = capamb = 0
+
+        # handle line-by-line in status file and filter useful labels
+        for line in t:
+            label, *cols = line.split()
+
+            if label == 'Name:':
+                name = cols[0]
+                continue
+
+            if label == 'Tgid:':
+                pid = int(cols[0])
+                continue
+
+            if label == 'Pid:':
+                tid = int(cols[0])
+                continue
+
+            if label == 'Uid:':
+                uid = int(cols[1])   # effective uid
+                continue
+
+            if label == 'CapInh:':
+                capinh = int(cols[0], 16)
+                continue
+
+            if label == 'CapPrm:':
+                capprm = int(cols[0], 16)
+                continue
+
+            if label == 'CapEff:':
+                capeff = int(cols[0], 16)
+                continue
+    
+            if label == 'CapAmb:':
+                capamb = int(cols[0], 16)
+                continue
+
+            if label == 'CapBnd:':
+                capbnd = int(cols[0], 16)
+                continue
+
+        t.close()
+
+        # print results for this thread
+        if args.human:
+            print('pid: %d   tid: %d   cmd: %s' % (pid, tid, name))
+
+
+            prettyprint('CAPEFF', capeff)
+            prettyprint('CAPPRM', capprm)
+            prettyprint('CAPINH', capinh)
+
+            if AMBIENT:
+                prettyprint('CAPAMB', capamb)
+
+            prettyprint('CAPBND', capbnd)
+
+            print()
+        elif args.long:
+            print('%7d %7d %-12.12s  %010x  %010x  %010x  %010x  %010x' %
+                        (pid, tid, name, capeff, capprm, capinh, capamb, capbnd)) 
+        else:
+            print('%7d %7d %-12.12s  %010x  %010x  %010x  %010x' %
+                        (pid, tid, name, capeff, capprm, capinh, capamb)) 
+
+
+# Function to translate a capability bitlist into a list of readable verbs
+#
+def findcaps(bitrange):
+    caps = ["chown", "dac_override", "dac_read_search", "fowner",
+            "fsetid", "kill", "setgid", "setuid", "setpcap",
+            "linux_immutable", "net_bind_service", "net_broadcast",
+            "net_admin", "net_raw", "ipc_lock", "ipc_owner",
+            "sys_module", "sys_rawio", "sys_chroot", "sys_ptrace",
+            "sys_pacct", "sys_admin", "sys_boot", "sys_nice",
+            "sys_resource", "sys_time", "sys_tty_config", "mknod",
+            "lease", "audit_write", "audit_control", "setfcap",
+            "mac_override", "mac_admin", "syslog", "wake_alarm",
+            "block_suspend", "audit_read"]
+
+    caplist = []
+
+    for i, cap in enumerate(caps):
+        if bitrange & (1<<i):
+            caplist.append(cap)
+
+    return caplist
+
+
+# Function to print a particular capability bitlist identified by the
+# label into human-readable output
+#
+def prettyprint(label, bitrange):
+    # all bits set?
+    if   bitrange == ALLCAPS:
+        print('    %6.6s: ALL' % label)
+    # no bits set?
+    elif bitrange == 0:
+        print('    %6.6s: NONE' % label)
+    # some bits set?
+    else:
+	# translate bits to verbs
+        caplist = findcaps(bitrange)
+        capline = ' '.join(caplist)
+
+	# verbs fit on one line?
+        if len(capline) < 67:
+            print('    %6.6s: %s' % (label, capline))
+        else:
+	    # print verbs spread over several lines
+            print('    %6.6s:' % label, end='')
+
+            caplen = 0
+            caplin = ''
+
+            for cap in caplist:
+                 if len(caplin) + len(cap) + 1 > 67:
+                     print(caplin)
+                     caplin = ''
+                     print('           ', end='')
+
+                 caplin += ' ' + cap 
+
+            print(caplin)
+
+
+main()
